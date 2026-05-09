@@ -2,7 +2,7 @@
 
 import { useStore } from '@/lib/store';
 
-export function usePresence(userId: number): boolean {
+export function usePresence(userId: string): boolean {
   const onlineUsers = useStore((s) => s.onlineUsers);
-  return onlineUsers.has(userId);
+  return onlineUsers.has(String(userId));
 }

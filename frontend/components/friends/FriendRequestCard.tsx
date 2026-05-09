@@ -3,9 +3,9 @@
 import api from '@/lib/api';
 
 interface FriendRequest {
-  id: number;
+  id: string;
   requester: {
-    id: number;
+    id: string;
     username: string;
     avatar_url: string | null;
     is_online: boolean;
@@ -15,7 +15,7 @@ interface FriendRequest {
 
 interface Props {
   request: FriendRequest;
-  onHandled: (id: number) => void;
+  onHandled: (id: string) => void;
 }
 
 export default function FriendRequestCard({ request, onHandled }: Props) {

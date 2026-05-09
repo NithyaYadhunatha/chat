@@ -8,18 +8,18 @@ import FriendRequestCard from '@/components/friends/FriendRequestCard';
 import { useRouter } from 'next/navigation';
 
 interface Friend {
-  id: number;
+  id: string;
   username: string;
   avatar_url: string | null;
   is_online: boolean;
   last_seen: string;
-  friendship_id: number;
+  friendship_id: string;
 }
 
 interface PendingRequest {
-  id: number;
+  id: string;
   requester: {
-    id: number;
+    id: string;
     username: string;
     avatar_url: string | null;
     is_online: boolean;
@@ -38,12 +38,12 @@ export default function FriendsPage() {
     api.get('/friends/pending').then(({ data }) => setPending(data));
   }, []);
 
-  async function handleMessage(userId: number) {
+  async function handleMessage(userId: string) {
     const { data } = await api.post('/conversations', { user_id: userId });
     router.push(`/conversations/${data.conversation_id}`);
   }
 
-  function handleRequestHandled(requestId: number) {
+  function handleRequestHandled(requestId: string) {
     setPending((prev) => prev.filter((r) => r.id !== requestId));
     // Refresh friends list
     api.get('/friends').then(({ data }) => setFriends(data));
