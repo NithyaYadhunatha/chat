@@ -44,7 +44,7 @@ export default function SearchUsers() {
 
   async function sendRequest(userId: number) {
     await api.post(`/friends/request/${userId}`);
-    setResults((prev) => prev.map((u) => u.id === userId ? { ...u, requested: true } : u));
+    setResults((prev) => prev.map((u) => String(u.id) === String(userId) ? { ...u, requested: true } : u));
   }
 
   async function openChat(userId: number) {
