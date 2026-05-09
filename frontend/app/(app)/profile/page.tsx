@@ -1,10 +1,12 @@
 'use client';
 
-export const dynamic = 'force-dynamic';
 
 import { useState, FormEvent } from 'react';
 import { useStore } from '@/lib/store';
 import api from '@/lib/api';
+
+
+export const dynamic = 'force-dynamic';
 
 export default function ProfilePage() {
   const { currentUser, setCurrentUser } = useStore();

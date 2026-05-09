@@ -1,12 +1,12 @@
 'use client';
 
-export const dynamic = 'force-dynamic';
-
 import { useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
 import api from '@/lib/api';
 import ChatWindow from '@/components/chat/ChatWindow';
 import { useStore, UserPublic, ConversationOut } from '@/lib/store';
+
+export const dynamic = 'force-dynamic';
 
 export default function ConversationPage() {
   const params = useParams();
