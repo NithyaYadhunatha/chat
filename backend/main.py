@@ -19,6 +19,7 @@ app.add_middleware(
         "http://localhost:3000",
         "https://chat-zeta-five-46.vercel.app",
         "https://chat-git-main-nithyas-projects-cac39a3b.vercel.app",
+        "https://chat-iota-wine.vercel.app",
     ],
     allow_credentials=True,
     allow_methods=["*"],
