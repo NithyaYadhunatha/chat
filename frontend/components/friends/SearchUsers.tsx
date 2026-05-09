@@ -42,12 +42,12 @@ export default function SearchUsers() {
     doSearch(e.target.value);
   }
 
-  async function sendRequest(userId: number) {
+  async function sendRequest(userId: string) {
     await api.post(`/friends/request/${userId}`);
-    setResults((prev) => prev.map((u) => String(u.id) === String(userId) ? { ...u, requested: true } : u));
+    setResults((prev) => prev.map((u) => u.id === userId ? { ...u, requested: true } : u));
   }
 
-  async function openChat(userId: number) {
+  async function openChat(userId: string) {
     const { data } = await api.post('/conversations', { user_id: userId });
     router.push(`/conversations/${data.conversation_id}`);
   }
@@ -88,13 +88,13 @@ export default function SearchUsers() {
               </div>
               <div className="flex gap-2">
                 <button
-                  onClick={() => openChat(user.id)}
+                  onClick={() => openChat(String(user.id))}
                   className="text-xs px-3 py-1.5 rounded-lg bg-gray-700 hover:bg-gray-600 text-gray-200 transition-colors"
                 >
                   Message
                 </button>
                 <button
-                  onClick={() => sendRequest(user.id)}
+                  onClick={() => sendRequest(String(user.id))}
                   disabled={user.requested}
                   className="text-xs px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-default text-white transition-colors"
                 >

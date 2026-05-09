@@ -4,13 +4,13 @@ import { useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
 import api from '@/lib/api';
 import ChatWindow from '@/components/chat/ChatWindow';
-import { useStore } from '@/lib/store';
+import { useStore, UserPublic, ConversationOut } from '@/lib/store';
 
 export default function ConversationPage() {
   const params = useParams();
   const id = params.id as string; // MongoDB ObjectID string
   const { conversations } = useStore();
-  const [otherUser, setOtherUser] = useState<any>(null);
+  const [otherUser, setOtherUser] = useState<UserPublic | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -21,9 +21,9 @@ export default function ConversationPage() {
     } else {
       // Fallback: fetch from API
       api.get('/conversations').then(({ data }) => {
-        const found = data.find((c: any) => c.id === id);
+        const found = (data as ConversationOut[]).find((c) => c.id === id);
         if (found) {
-          useStore.getState().setConversations(data);
+          useStore.getState().setConversations(data as ConversationOut[]);
           setOtherUser(found.other_user);
         }
         setLoading(false);
