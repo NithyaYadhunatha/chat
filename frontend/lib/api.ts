@@ -42,14 +42,18 @@ api.interceptors.response.use(
           { withCredentials: true }
         );
         const newToken: string = data.access_token;
-        (window as any).__access_token = newToken;
+        if (typeof window !== 'undefined') {
+          (window as any).__access_token = newToken;
+        }
         refreshQueue.forEach((cb) => cb(newToken));
         refreshQueue = [];
         original.headers.Authorization = `Bearer ${newToken}`;
         return api(original);
       } catch {
-        (window as any).__access_token = undefined;
-        window.location.href = '/login';
+        if (typeof window !== 'undefined') {
+          (window as any).__access_token = undefined;
+          window.location.href = '/login';
+        }
       } finally {
         refreshing = false;
       }
