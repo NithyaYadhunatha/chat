@@ -91,7 +91,7 @@ export default function FriendsPage() {
           ) : (
             <div className="space-y-2">
               {friends.map((friend) => {
-                const isOnline = onlineUsers.has(friend.id) || friend.is_online;
+                const isOnline = onlineUsers.has(String(friend.id)) || friend.is_online;
                 return (
                   <div key={friend.id} className="flex items-center gap-3 p-3 bg-gray-800 rounded-xl hover:bg-gray-750 transition-colors">
                     <div className="relative flex-shrink-0">
@@ -103,9 +103,8 @@ export default function FriendsPage() {
                         )}
                       </div>
                       <span
-                        className={`absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full border-2 border-gray-800 ${
-                          isOnline ? 'bg-emerald-400' : 'bg-gray-600'
-                        }`}
+                        className={`absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full border-2 border-gray-800 ${isOnline ? 'bg-emerald-400' : 'bg-gray-600'
+                          }`}
                       />
                     </div>
                     <div className="flex-1 min-w-0">
