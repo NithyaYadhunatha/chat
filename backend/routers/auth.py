@@ -113,7 +113,8 @@ async def google_login(body: GoogleAuthRequest, response: Response):
             )
             existing_username = await User.find_one(User.username == user.username)
             if existing_username:
-                user.username = f"{user.username}_{google_id[:5]}"
+                base_username = user.username.replace(" ", "")
+                user.username = f"{base_username}_{google_id[:5]}"
             
             await user.insert()
         else:
