@@ -8,12 +8,18 @@ from routers import reports, stranger  # noqa: F401
 from websocket.handler import handle_websocket
 from auth import decode_token
 
+from fastapi.middleware.cors import CORSMiddleware
+
 app = FastAPI(title="ChatApp API", version="2.0.0")
 
-# CORS
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.FRONTEND_ORIGIN],
+    allow_origins=[
+        "http://localhost:3000",
+        "https://chat-zeta-five-46.vercel.app",
+        "https://chat-git-main-nithyas-projects-cac39a3b.vercel.app",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
