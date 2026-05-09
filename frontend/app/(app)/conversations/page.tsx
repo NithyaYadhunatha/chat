@@ -1,5 +1,7 @@
 'use client';
 
+export const dynamic = 'force-dynamic';
+
 import { useStore } from '@/lib/store';
 import Link from 'next/link';
 import { formatDistanceToNow, parseISO } from 'date-fns';

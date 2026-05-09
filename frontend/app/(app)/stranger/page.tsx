@@ -1,5 +1,7 @@
 'use client';
 
+export const dynamic = 'force-dynamic';
+
 import { useEffect, useRef, useState, KeyboardEvent, useCallback } from 'react';
 import { useStore, StrangerMessage } from '@/lib/store';
 import { useWebSocket } from '@/hooks/useWebSocket';
