@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, WebSocket, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -8,9 +10,14 @@ from routers import reports, stranger  # noqa: F401
 from websocket.handler import handle_websocket
 from auth import decode_token
 
-from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="ChatApp API", version="2.0.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup and shutdown lifecycle for the FastAPI application."""
+    await init_db()
+    yield
+
+app = FastAPI(title="ChatApp API", version="2.0.0", lifespan=lifespan)
 
 
 app.add_middleware(
@@ -38,10 +45,6 @@ app.include_router(messages.router)
 app.include_router(reports.router)
 app.include_router(stranger.router)
 
-
-@app.on_event("startup")
-async def on_startup():
-    await init_db()
 
 
 @app.get("/health")
