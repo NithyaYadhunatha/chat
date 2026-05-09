@@ -2,11 +2,11 @@
 
 export const dynamic = 'force-dynamic';
 
-import dynamic from 'next/dynamic';
+import loadDynamic from 'next/dynamic';
 
 // AppShell uses useStore, useWebSocket, axios — all browser-only.
 // ssr:false ensures Next.js never tries to server-render this component tree.
-const AppShell = dynamic(() => import('@/components/AppShell'), {
+const AppShell = loadDynamic(() => import('@/components/AppShell'), {
   ssr: false,
   loading: () => (
     <div className="min-h-screen flex items-center justify-center bg-gray-950">

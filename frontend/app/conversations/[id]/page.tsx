@@ -2,11 +2,11 @@
 
 export const dynamic = 'force-dynamic';
 
-import dynamic from 'next/dynamic';
+import loadDynamic from 'next/dynamic';
 
 // Disable SSR entirely — this page depends on browser APIs (Zustand, WebSocket)
 // and must never be server-rendered. next/dynamic with ssr:false achieves this.
-const ConversationClient = dynamic(
+const ConversationClient = loadDynamic(
   () => import('@/components/chat/ConversationClient'),
   {
     ssr: false,
