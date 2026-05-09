@@ -7,6 +7,12 @@ import { useStore } from '@/lib/store';
 import api from '@/lib/api';
 import { useGoogleLogin } from '@react-oauth/google';
 
+function setRefreshCookie(token: string) {
+  const expires = new Date();
+  expires.setDate(expires.getDate() + 7);
+  document.cookie = `refresh_token=${token}; path=/; expires=${expires.toUTCString()}; SameSite=Lax`;
+}
+
 export default function RegisterPage() {
   const router = useRouter();
   const { setAccessToken, setCurrentUser } = useStore();
@@ -23,6 +29,7 @@ export default function RegisterPage() {
     try {
       const { data } = await api.post('/auth/register', { username, email, password });
       setAccessToken(data.access_token);
+      if (data.refresh_token) setRefreshCookie(data.refresh_token);
       const { data: me } = await api.get('/users/me');
       setCurrentUser(me);
       router.push('/conversations');
@@ -41,6 +48,7 @@ export default function RegisterPage() {
       try {
         const { data } = await api.post('/auth/google', { code: codeResponse.code });
         setAccessToken(data.access_token);
+        if (data.refresh_token) setRefreshCookie(data.refresh_token);
         const { data: me } = await api.get('/users/me');
         setCurrentUser(me);
         router.push('/conversations');

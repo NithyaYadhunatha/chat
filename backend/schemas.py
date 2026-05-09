@@ -69,6 +69,7 @@ class LoginRequest(BaseModel):
 
 class TokenResponse(BaseModel):
     access_token: str
+    refresh_token: Optional[str] = None  # returned in body so frontend can set cookie cross-origin
     token_type: str = "bearer"
 
 

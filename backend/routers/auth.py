@@ -43,7 +43,7 @@ async def register(body: UserCreate, response: Response):
         samesite="lax",
         max_age=7 * 24 * 3600,
     )
-    return {"access_token": access_token}
+    return {"access_token": access_token, "refresh_token": refresh_token}
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -62,7 +62,7 @@ async def login(body: LoginRequest, response: Response):
         samesite="lax",
         max_age=7 * 24 * 3600,
     )
-    return {"access_token": access_token}
+    return {"access_token": access_token, "refresh_token": refresh_token}
 
 
 @router.post("/google", response_model=TokenResponse)
@@ -135,7 +135,7 @@ async def google_login(body: GoogleAuthRequest, response: Response):
             samesite="lax",
             max_age=7 * 24 * 3600,
         )
-        return {"access_token": access_token}
+        return {"access_token": access_token, "refresh_token": refresh_token}
     except ValueError:
         raise HTTPException(status_code=401, detail="Invalid Google token")
 
@@ -171,7 +171,7 @@ async def refresh(
         samesite="lax",
         max_age=7 * 24 * 3600,
     )
-    return {"access_token": access_token}
+    return {"access_token": access_token, "refresh_token": new_refresh}
 
 
 @router.post("/logout")
