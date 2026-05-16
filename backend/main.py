@@ -29,6 +29,7 @@ app.add_middleware(
         "https://chat-iota-wine.vercel.app",
         "https://chat-nithyas-projects-cac39a3b.vercel.app",
         "https://abiding-recipient-sniff.ngrok-free.dev",
+        "https://chat-sage-ten.vercel.app",
     ],
     allow_credentials=True,
     allow_methods=["*"],
