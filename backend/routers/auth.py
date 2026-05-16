@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Response, Cookie
+from pydantic import BaseModel
 from typing import Optional
 from beanie.operators import Or
 from beanie import PydanticObjectId
@@ -36,13 +37,6 @@ async def register(body: UserCreate, response: Response):
     access_token = create_access_token({"sub": str(user.id)})
     refresh_token = create_refresh_token({"sub": str(user.id)})
 
-    response.set_cookie(
-        key="refresh_token",
-        value=refresh_token,
-        httponly=True,
-        samesite="lax",
-        max_age=7 * 24 * 3600,
-    )
     return {"access_token": access_token, "refresh_token": refresh_token}
 
 
@@ -55,13 +49,6 @@ async def login(body: LoginRequest, response: Response):
     access_token = create_access_token({"sub": str(user.id)})
     refresh_token = create_refresh_token({"sub": str(user.id)})
 
-    response.set_cookie(
-        key="refresh_token",
-        value=refresh_token,
-        httponly=True,
-        samesite="lax",
-        max_age=7 * 24 * 3600,
-    )
     return {"access_token": access_token, "refresh_token": refresh_token}
 
 
@@ -128,23 +115,22 @@ async def google_login(body: GoogleAuthRequest, response: Response):
         access_token = create_access_token({"sub": str(user.id)})
         refresh_token = create_refresh_token({"sub": str(user.id)})
 
-        response.set_cookie(
-            key="refresh_token",
-            value=refresh_token,
-            httponly=True,
-            samesite="lax",
-            max_age=7 * 24 * 3600,
-        )
         return {"access_token": access_token, "refresh_token": refresh_token}
     except ValueError:
         raise HTTPException(status_code=401, detail="Invalid Google token")
 
 
+class RefreshBody(BaseModel):
+    refresh_token: Optional[str] = None
+
 @router.post("/refresh", response_model=TokenResponse)
 async def refresh(
     response: Response,
-    refresh_token: Optional[str] = Cookie(default=None),
+    body: RefreshBody = RefreshBody(),
+    cookie_token: Optional[str] = Cookie(default=None, alias="refresh_token"),
 ):
+    # Accept token from body first (cross-origin), fall back to httpOnly cookie
+    refresh_token = body.refresh_token or cookie_token
     if not refresh_token:
         raise HTTPException(status_code=401, detail="No refresh token")
 
@@ -164,17 +150,9 @@ async def refresh(
 
     access_token = create_access_token({"sub": str(user.id)})
     new_refresh = create_refresh_token({"sub": str(user.id)})
-    response.set_cookie(
-        key="refresh_token",
-        value=new_refresh,
-        httponly=True,
-        samesite="lax",
-        max_age=7 * 24 * 3600,
-    )
     return {"access_token": access_token, "refresh_token": new_refresh}
 
 
 @router.post("/logout")
-async def logout(response: Response):
-    response.delete_cookie("refresh_token")
+async def logout():
     return {"detail": "Logged out"}

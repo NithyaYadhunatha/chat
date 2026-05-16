@@ -15,12 +15,12 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     async function bootstrap() {
       try {
-        const { data: tokenData } = await api.post('/auth/refresh', {});
+        const refresh = localStorage.getItem('refresh_token');
+        if (!refresh) throw new Error('No refresh token');
+        const { data: tokenData } = await api.post('/auth/refresh', { refresh_token: refresh });
         setAccessToken(tokenData.access_token);
-        if (tokenData.refresh_token && typeof document !== 'undefined') {
-          const expires = new Date();
-          expires.setDate(expires.getDate() + 7);
-          document.cookie = `refresh_token=${tokenData.refresh_token}; path=/; expires=${expires.toUTCString()}; SameSite=Lax`;
+        if (tokenData.refresh_token) {
+          localStorage.setItem('refresh_token', tokenData.refresh_token);
         }
         const { data: me } = await api.get('/users/me');
         setCurrentUser(me);

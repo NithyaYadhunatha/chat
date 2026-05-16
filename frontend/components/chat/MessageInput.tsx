@@ -3,6 +3,7 @@
 import { useState, useRef, useCallback, KeyboardEvent } from 'react';
 import api from '@/lib/api';
 import { useWebSocket } from '@/hooks/useWebSocket';
+import { useStore } from '@/lib/store';
 import { Button } from '@/components/ui/button';
 
 interface Props {
@@ -45,14 +46,40 @@ export default function MessageInput({ conversationId, otherUserId }: Props) {
     if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
     isTypingRef.current = false;
     sendTyping(conversationId, false);
+
+    // Optimistic update — show the message immediately in the UI
+    const { currentUser, appendMessage, upsertConversation, conversations } =
+      useStore.getState();
+    const tempId = `temp-${Date.now()}`;
+    const optimisticMsg = {
+      id: tempId,
+      conversation_id: conversationId,
+      sender_id: currentUser?.id ?? '',
+      content: trimmed,
+      message_type: 'text',
+      is_read: false,
+      created_at: new Date().toISOString(),
+      sender: currentUser!,
+    };
+    appendMessage(conversationId, optimisticMsg);
+    const conv = conversations.find((c) => c.id === conversationId);
+    if (conv) upsertConversation({ ...conv, last_message: optimisticMsg });
+
+    // Clear input immediately for responsive feel
+    setContent('');
+    if (textareaRef.current) textareaRef.current.style.height = 'auto';
+
     try {
-      await api.post(`/conversations/${conversationId}/messages`, { content: trimmed });
-      setContent('');
-      if (textareaRef.current) {
-        textareaRef.current.style.height = 'auto';
-      }
+      const { data: savedMsg } = await api.post(
+        `/conversations/${conversationId}/messages`,
+        { content: trimmed }
+      );
+      // Replace the temp message with the server-confirmed one
+      useStore.getState().replaceMessage(conversationId, tempId, savedMsg);
     } catch (e) {
       console.error(e);
+      // Remove the optimistic message on failure
+      useStore.getState().removeMessage(conversationId, tempId);
     } finally {
       setSending(false);
       textareaRef.current?.focus();

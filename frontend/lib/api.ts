@@ -2,7 +2,10 @@ import axios, { AxiosInstance, InternalAxiosRequestConfig } from 'axios';
 
 const api: AxiosInstance = axios.create({
   baseURL: process.env.NEXT_PUBLIC_API_URL,
-  withCredentials: true, // send httpOnly cookie for refresh
+  withCredentials: false, // no cookies needed anymore
+  headers: {
+    'ngrok-skip-browser-warning': 'true',
+  },
 });
 
 // Attach access token from memory on every request
@@ -36,24 +39,25 @@ api.interceptors.response.use(
       }
       refreshing = true;
       try {
+        const storedRefresh = localStorage.getItem('refresh_token');
+        if (!storedRefresh) throw new Error('No refresh token');
+        
         const { data } = await axios.post(
           `${process.env.NEXT_PUBLIC_API_URL}/auth/refresh`,
-          {},
-          { withCredentials: true }
+          { refresh_token: storedRefresh }, // send in body
+          { headers: { 'ngrok-skip-browser-warning': 'true' } }
         );
         const newToken: string = data.access_token;
-        if (typeof window !== 'undefined') {
-          (window as any).__access_token = newToken;
-        }
+        if (data.refresh_token) localStorage.setItem('refresh_token', data.refresh_token);
+        (window as any).__access_token = newToken;
         refreshQueue.forEach((cb) => cb(newToken));
         refreshQueue = [];
         original.headers.Authorization = `Bearer ${newToken}`;
         return api(original);
       } catch {
-        if (typeof window !== 'undefined') {
-          (window as any).__access_token = undefined;
-          window.location.href = '/login';
-        }
+        localStorage.removeItem('refresh_token');
+        (window as any).__access_token = undefined;
+        window.location.href = '/login';
       } finally {
         refreshing = false;
       }

@@ -61,6 +61,8 @@ interface AppState {
   setMessages: (convId: string, msgs: MessageOut[]) => void;
   prependMessages: (convId: string, msgs: MessageOut[]) => void;
   appendMessage: (convId: string, msg: MessageOut) => void;
+  replaceMessage: (convId: string, tempId: string, msg: MessageOut) => void;
+  removeMessage: (convId: string, msgId: string) => void;
   markRead: (convId: string) => void;
 
   // Unread counts
@@ -126,10 +128,32 @@ export const useStore = create<AppState>((set, get) => ({
       },
     })),
   appendMessage: (convId, msg) =>
+    set((s) => {
+      const existing = s.messagesCache[convId] ?? [];
+      // Deduplicate: skip if a message with the same ID is already present
+      if (existing.some((m) => m.id === msg.id)) return {};
+      return {
+        messagesCache: {
+          ...s.messagesCache,
+          [convId]: [...existing, msg],
+        },
+      };
+    }),
+  replaceMessage: (convId, tempId, msg) =>
+    set((s) => {
+      const existing = s.messagesCache[convId] ?? [];
+      // If the real ID is already in the list (from WS), just remove the temp
+      const hasReal = existing.some((m) => m.id === msg.id);
+      const next = hasReal
+        ? existing.filter((m) => m.id !== tempId)
+        : existing.map((m) => (m.id === tempId ? msg : m));
+      return { messagesCache: { ...s.messagesCache, [convId]: next } };
+    }),
+  removeMessage: (convId, msgId) =>
     set((s) => ({
       messagesCache: {
         ...s.messagesCache,
-        [convId]: [...(s.messagesCache[convId] ?? []), msg],
+        [convId]: (s.messagesCache[convId] ?? []).filter((m) => m.id !== msgId),
       },
     })),
   markRead: (convId) =>
