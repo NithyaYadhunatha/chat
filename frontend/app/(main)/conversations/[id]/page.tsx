@@ -1,4 +1,7 @@
-'use client';
+// Server Component — no 'use client' so we can export route segment config.
+// This prevents the /_next/data prefetch request from invoking a server function
+// that has nothing to execute (which caused the FUNCTION_INVOCATION_FAILED 500).
+export const dynamic = 'force-dynamic';
 
 import loadDynamic from 'next/dynamic';
 

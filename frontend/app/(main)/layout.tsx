@@ -1,4 +1,7 @@
-'use client';
+// Server Component — no 'use client' so we can export route segment config.
+// export dynamic prevents Next.js from pre-rendering / caching any child route
+// on the server, which is required because all children are pure client-side SPA pages.
+export const dynamic = 'force-dynamic';
 
 import loadDynamic from 'next/dynamic';
 
