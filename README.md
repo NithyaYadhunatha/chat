@@ -4,17 +4,32 @@ A full-stack real-time chat application.
 
 ## Stack
 - **Frontend**: Next.js 14 (App Router), Tailwind CSS, Zustand, Axios
-- **Backend**: Python FastAPI, SQLAlchemy async, asyncpg
-- **Database**: PostgreSQL
+- **Backend**: Python FastAPI, Beanie/Motor (async)
+- **Database**: MongoDB
 - **Real-time**: Native FastAPI WebSockets
-- **Auth**: JWT (access token in memory + refresh token in httpOnly cookie)
+- **Auth**: JWT (email/password + Google sign-in)
 
 ---
 
 ## Prerequisites
 - Node.js 18+
 - Python 3.11+
-- PostgreSQL running locally
+- MongoDB running locally (or a MongoDB Atlas URI)
+- A Google OAuth client ID/secret (for Google sign-in)
+
+---
+
+## Quick Start (two terminals)
+
+1. Start MongoDB (local `mongod`, or use an Atlas URI in `MONGODB_URL`).
+2. Terminal 1 - backend: follow **Backend Setup** below (runs on :8000).
+3. Terminal 2 - frontend: follow **Frontend Setup** below (runs on :3000).
+4. Open http://localhost:3000, register or sign in with Google, then add a friend or try Stranger chat.
+
+## Google Sign-in Setup
+1. In Google Cloud Console, create an OAuth 2.0 Client ID (type: Web application).
+2. Add `http://localhost:3000` to Authorized JavaScript origins.
+3. Put the client ID in both `backend/.env` (`GOOGLE_CLIENT_ID`) and `frontend/.env.local` (`NEXT_PUBLIC_GOOGLE_CLIENT_ID`), and the secret in `backend/.env` (`GOOGLE_CLIENT_SECRET`).
 
 ---
 
@@ -32,13 +47,10 @@ venv\Scripts\activate   # Windows
 pip install -r requirements.txt
 
 # Copy env file and configure
-copy .env.example .env
-# Edit .env: set DATABASE_URL, SECRET_KEY
+copy .env.example .env      # Linux/Mac: cp .env.example .env
+# Edit .env: set MONGODB_URL, SECRET_KEY, GOOGLE_CLIENT_ID/SECRET
 
-# Create database (PostgreSQL must be running)
-# createdb chatapp
-
-# Run the server (tables auto-created on startup)
+# Run the server
 uvicorn main:app --reload --port 8000
 ```
 
@@ -53,6 +65,7 @@ Interactive docs: http://localhost:8000/docs
 cd frontend
 
 npm install
+copy .env.example .env.local   # Linux/Mac: cp ...; then fill in values
 npm run dev
 ```
 
@@ -63,20 +76,17 @@ The app will be available at http://localhost:3000
 ## Environment Variables
 
 ### backend/.env
-```
-DATABASE_URL=postgresql+asyncpg://user:pass@localhost/chatapp
-SECRET_KEY=your-super-secret-key-change-in-production
-ALGORITHM=HS256
-ACCESS_TOKEN_EXPIRE_MINUTES=30
-REFRESH_TOKEN_EXPIRE_DAYS=7
-FRONTEND_ORIGIN=http://localhost:3000
-```
+See `backend/.env.example`. Never commit the real `.env`.
 
 ### frontend/.env.local
-```
-NEXT_PUBLIC_API_URL=http://localhost:8000
-NEXT_PUBLIC_WS_URL=ws://localhost:8000
-```
+See `frontend/.env.example`.
+
+---
+
+## Deployment notes
+- Frontend: deploy `frontend/` to Vercel; set the three `NEXT_PUBLIC_*` variables. Use `wss://` for `NEXT_PUBLIC_WS_URL` in production.
+- Backend: any host that runs `uvicorn main:app --host 0.0.0.0 --port $PORT` (Python 3.11, see `runtime.txt`).
+- Add your deployed frontend URL to the `allow_origins` list in `backend/main.py` and set `FRONTEND_ORIGIN`.
 
 ---
 

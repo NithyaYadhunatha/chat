@@ -33,3 +33,6 @@ imp.txt
 .DS_Store
 Thumbs.db
 ehthumbs.db
+
+# Logs
+*.log
