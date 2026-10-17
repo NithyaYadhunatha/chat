@@ -1,316 +1,166 @@
 """
-WebSocket event handler.
-Routes events by `mode` field:
-  - mode == "friends"  → friends_handler
-  - mode == "stranger" → stranger_handler
-  - (no mode)          → friends_handler (backwards compat)
+WebSocket entry point.
+
+Protocol
+  1. Client connects to /ws (Origin must be an allowed origin).
+  2. First frame must be {"type": "auth", "token": "<access token>"} within 10s.
+     The token is never put in the URL, so it doesn't end up in proxy logs.
+  3. Every frame afterwards is {"type": "<namespace>.<action>", ...}.
 """
+import asyncio
 import json
-from datetime import datetime, timezone
-from beanie.operators import Or
+import logging
+
 from beanie import PydanticObjectId
+from beanie.operators import Or
+from fastapi import HTTPException, WebSocket, WebSocketDisconnect
 
-from fastapi import WebSocket, WebSocketDisconnect
-
-from models import User, Friendship, FriendshipStatus, ConversationMember
+from auth import user_from_access_token
+from config import settings
+from models import Conversation, Friendship, FriendshipStatus, User, utcnow
+from ratelimit import limiter
+from websocket import stranger
 from websocket.manager import manager
-from matching.queue import add_to_queue, remove_from_queue, try_match, is_in_queue
-from matching.manager import match_manager
-from moderation.filter import check_message, is_spam
-from moderation.strikes import add_strike, check_ban_status
+
+log = logging.getLogger("ws")
+
+AUTH_TIMEOUT_SECONDS = 10
+MAX_FRAME_BYTES = 8 * 1024
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-async def get_friend_ids(user_id: PydanticObjectId) -> list[str]:
+async def friend_ids(user_oid: PydanticObjectId) -> list[str]:
     friends = await Friendship.find(
-        {"status": FriendshipStatus.accepted},
-        Or(
-            {"requester_id": user_id},
-            {"receiver_id": user_id},
-        )
+        Friendship.status == FriendshipStatus.accepted,
+        Or(Friendship.requester_id == user_oid, Friendship.receiver_id == user_oid),
     ).to_list()
-
-    ids = []
-    for f in friends:
-        ids.append(str(f.receiver_id) if f.requester_id == user_id else str(f.requester_id))
-    return ids
+    return [str(f.receiver_id if f.requester_id == user_oid else f.requester_id) for f in friends]
 
 
-# ── Friends event handler ─────────────────────────────────────────────────────
+async def _set_presence(user: User, online: bool) -> None:
+    user.is_online = online
+    if not online:
+        user.last_seen = utcnow()
+    await user.save()
+    await manager.broadcast(await friend_ids(user.id), {
+        "type": "presence", "user_id": str(user.id), "online": online,
+        "last_seen": user.last_seen.isoformat(),
+    })
 
-async def handle_friends_event(data: dict, user_id: str, user_oid: PydanticObjectId):
-    event_type = data.get("type")
 
-    if event_type == "typing":
-        conv_id = data.get("conversation_id")
-        is_typing = data.get("is_typing", False)
+async def _dm_typing(user: User, data: dict) -> None:
+    try:
+        conv_oid = PydanticObjectId(str(data.get("conversation_id")))
+    except Exception:
+        return
+    conv = await Conversation.get(conv_oid)
+    if conv is None or user.id not in conv.member_ids:
+        return
+    for member in conv.member_ids:
+        if member != user.id:
+            await manager.send(str(member), {
+                "type": "dm.typing", "conversation_id": str(conv.id),
+                "user_id": str(user.id), "typing": bool(data.get("typing")),
+            })
 
+
+async def _dispatch(user: User, data: dict) -> None:
+    uid = str(user.id)
+    kind = data.get("type")
+
+    if kind == "ping":
+        await manager.send(uid, {"type": "pong"})
+    elif kind == "stranger.join":
+        await stranger.join(uid, data.get("interests"))
+    elif kind == "stranger.next":
+        await stranger.skip(uid, data.get("interests"))
+    elif kind == "stranger.leave":
+        await stranger.leave(uid)
+    elif kind == "stranger.message":
+        await stranger.message(uid, data.get("text"), data.get("client_id"), data.get("reply_to"))
+    elif kind == "stranger.react":
+        await stranger.react(uid, data.get("message_id"), data.get("emoji"))
+    elif kind == "stranger.edit":
+        await stranger.edit(uid, data.get("message_id"), data.get("text"))
+    elif kind == "stranger.unsend":
+        await stranger.unsend(uid, data.get("message_id"))
+    elif kind == "stranger.seen":
+        await stranger.seen(uid, data.get("message_id"))
+    elif kind == "stranger.typing":
+        await stranger.typing(uid, bool(data.get("typing")))
+    elif kind == "stranger.connect":
+        await stranger.connect(uid)
+    elif kind == "stranger.play_cpu":
+        await stranger.play_cpu(uid)
+    elif kind == "stranger.serve":
+        await stranger.serve(uid)
+    elif kind == "stranger.rate":
+        await stranger.rate(uid, data.get("session_id"), data.get("value"))
+    elif kind == "dm.typing":
+        if limiter.hit(f"dmtyping:{uid}", 12, 5):
+            await _dm_typing(user, data)
+
+
+def _origin_allowed(ws: WebSocket) -> bool:
+    origin = (ws.headers.get("origin") or "").rstrip("/")
+    # Non-browser clients send no Origin; browsers always do. Only browsers can be
+    # tricked into cross-site WebSocket hijacking, so that's what we check.
+    return not origin or origin in settings.allowed_origins
+
+
+async def websocket_endpoint(ws: WebSocket) -> None:
+    if not _origin_allowed(ws):
+        await ws.close(code=4403)
+        return
+    await ws.accept()
+
+    try:
+        raw = await asyncio.wait_for(ws.receive_text(), timeout=AUTH_TIMEOUT_SECONDS)
+        frame = json.loads(raw) if len(raw) <= MAX_FRAME_BYTES else {}
+        if frame.get("type") != "auth":
+            raise ValueError("expected auth")
+        user = await user_from_access_token(str(frame.get("token", "")))
+    except (asyncio.TimeoutError, ValueError, json.JSONDecodeError, HTTPException, WebSocketDisconnect, AttributeError):
         try:
-            conv_oid = PydanticObjectId(conv_id)
+            await ws.close(code=4001)
         except Exception:
-            return
+            pass
+        return
 
-        members = await ConversationMember.find(
-            {"conversation_id": conv_oid, "user_id": {"$ne": user_oid}}
-        ).to_list()
+    uid = str(user.id)
+    previous = await manager.register(uid, ws)
+    if previous is not None:
+        await stranger.disconnect(uid)
+        try:
+            await previous.close(code=4000)  # replaced by a newer connection
+        except Exception:
+            pass
 
-        for member in members:
-            await manager.send_to_user(str(member.user_id), {
-                "type": "typing",
-                "mode": "friends",
-                "conversation_id": str(conv_id),
-                "user_id": str(user_id),
-                "is_typing": is_typing,
-            })
-
-
-# ── Stranger event handler ────────────────────────────────────────────────────
-
-async def handle_stranger_event(data: dict, user_id: str):
-    event_type = data.get("type")
-
-    if event_type == "join_queue":
-        # Check ban status first
-        banned, ban_reason = await check_ban_status(user_id)
-        if banned:
-            await manager.send_to_user(user_id, {
-                "type": "banned",
-                "mode": "stranger",
-                "reason": ban_reason or "You are banned from stranger chat.",
-            })
-            return
-
-        # Don't add if already in session
-        existing = await match_manager.get_session_for_user(user_id)
-        if existing:
-            await manager.send_to_user(user_id, {
-                "type": "already_in_session",
-                "mode": "stranger",
-                "session_id": existing.session_id,
-            })
-            return
-
-        await add_to_queue(user_id)
-        await manager.send_to_user(user_id, {
-            "type": "queued",
-            "mode": "stranger",
-        })
-
-        # Try to match
-        pair = await try_match()
-        if pair:
-            u1, u2 = pair
-            session = await match_manager.create_session(u1, u2)
-            matched_payload = {
-                "type": "matched",
-                "mode": "stranger",
-                "session_id": session.session_id,
-            }
-            await manager.send_to_user(u1, matched_payload)
-            await manager.send_to_user(u2, matched_payload)
-
-    elif event_type == "message":
-        session_id = data.get("session_id")
-        content = data.get("content", "").strip()
-        if not content:
-            return
-
-        session = await match_manager.get_session_for_user(user_id)
-        if not session or session.session_id != session_id:
-            await manager.send_to_user(user_id, {
-                "type": "error",
-                "mode": "stranger",
-                "detail": "No active session or session mismatch",
-            })
-            return
-
-        # Spam check
-        if is_spam(content, session.recent_messages):
-            await manager.send_to_user(user_id, {
-                "type": "warning",
-                "mode": "stranger",
-                "reason": "You are sending too many identical messages.",
-            })
-            return
-
-        # Content filter
-        verdict, severity, label = check_message(content)
-
-        if verdict == "warn":
-            await manager.send_to_user(user_id, {
-                "type": "warning",
-                "mode": "stranger",
-                "reason": f"Your message contained inappropriate content ({label}). Please keep it civil.",
-            })
-            # Still deliver (low severity), but with a warning
-        elif verdict == "strike":
-            strike_result = await add_strike(user_id, label or "policy violation")
-            await manager.send_to_user(user_id, {
-                "type": "warning",
-                "mode": "stranger",
-                "reason": strike_result.message,
-            })
-            if strike_result.is_banned:
-                # End session + disconnect
-                partner_id = session.other_user(user_id)
-                await match_manager.end_session(session.session_id, reason="user_banned")
-                if partner_id:
-                    await manager.send_to_user(partner_id, {
-                        "type": "partner_left",
-                        "mode": "stranger",
-                        "session_id": session.session_id,
-                    })
-            return  # Don't deliver struck message
-
-        # Deliver to partner
-        partner_id = session.other_user(user_id)
-        if partner_id:
-            await manager.send_to_user(partner_id, {
-                "type": "message",
-                "mode": "stranger",
-                "session_id": session.session_id,
-                "content": content,
-                "sender_id": user_id,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            })
-
-        # Echo back to sender (for message_id consistency; sender sees own msg too)
-        await manager.send_to_user(user_id, {
-            "type": "message_sent",
-            "mode": "stranger",
-            "session_id": session.session_id,
-            "content": content,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        })
-
-        await match_manager.increment_message_count(session.session_id, content)
-
-    elif event_type == "next":
-        # User wants a new partner
-        session = await match_manager.get_session_for_user(user_id)
-        session_id = data.get("session_id")
-
-        if session and (not session_id or session.session_id == session_id):
-            partner_id = session.other_user(user_id)
-            await match_manager.end_session(session.session_id, reason="skipped")
-
-            if partner_id:
-                await manager.send_to_user(partner_id, {
-                    "type": "partner_left",
-                    "mode": "stranger",
-                    "session_id": session.session_id,
-                })
-
-        # Re-queue this user
-        banned, ban_reason = await check_ban_status(user_id)
-        if banned:
-            await manager.send_to_user(user_id, {
-                "type": "banned",
-                "mode": "stranger",
-                "reason": ban_reason or "You are banned from stranger chat.",
-            })
-            return
-
-        await add_to_queue(user_id)
-        await manager.send_to_user(user_id, {
-            "type": "queued",
-            "mode": "stranger",
-        })
-
-        pair = await try_match()
-        if pair:
-            u1, u2 = pair
-            new_session = await match_manager.create_session(u1, u2)
-            matched_payload = {
-                "type": "matched",
-                "mode": "stranger",
-                "session_id": new_session.session_id,
-            }
-            await manager.send_to_user(u1, matched_payload)
-            await manager.send_to_user(u2, matched_payload)
-
-    elif event_type == "leave":
-        # User explicitly leaves (goes back to idle)
-        session = await match_manager.get_session_for_user(user_id)
-        if session:
-            partner_id = session.other_user(user_id)
-            await match_manager.end_session(session.session_id, reason="left")
-            if partner_id:
-                await manager.send_to_user(partner_id, {
-                    "type": "partner_left",
-                    "mode": "stranger",
-                    "session_id": session.session_id,
-                })
-        # Also remove from queue if queued
-        await remove_from_queue(user_id)
-
-
-# ── Main handler ──────────────────────────────────────────────────────────────
-
-async def handle_websocket(websocket: WebSocket, user_id: str):
-    user_oid = PydanticObjectId(user_id)
-    await manager.connect(user_id, websocket)
-
-    # Mark online
-    user = await User.get(user_oid)
-    if user:
-        user.is_online = True
-        await user.save()
-
-        friend_ids = await get_friend_ids(user_oid)
-        await manager.broadcast_to_users(friend_ids, {
-            "type": "presence",
-            "mode": "friends",
-            "user_id": user_id,
-            "is_online": True,
-        })
+    await manager.send(uid, {"type": "auth.ok", "user_id": uid})
+    await _set_presence(user, True)
 
     try:
         while True:
-            raw = await websocket.receive_text()
+            raw = await ws.receive_text()
+            if len(raw) > MAX_FRAME_BYTES:
+                await ws.close(code=1009)
+                break
+            if not limiter.hit(f"ws:{uid}", 40, 5):
+                continue  # flood: drop silently
             try:
                 data = json.loads(raw)
-            except Exception:
+            except json.JSONDecodeError:
                 continue
-
-            mode = data.get("mode", "friends")
-
-            if mode == "stranger":
-                await handle_stranger_event(data, user_id)
-            else:
-                # Default: friends mode
-                await handle_friends_event(data, user_id, user_oid)
-
-    except WebSocketDisconnect:
+            if isinstance(data, dict):
+                try:
+                    await _dispatch(user, data)
+                except Exception:
+                    log.exception("error handling %s", data.get("type"))
+    except (WebSocketDisconnect, RuntimeError):
         pass
     finally:
-        manager.disconnect(user_id)
-
-        # Clean up stranger state
-        await remove_from_queue(user_id)
-        session = await match_manager.get_session_for_user(user_id)
-        if session:
-            partner_id = session.other_user(user_id)
-            await match_manager.end_session(session.session_id, reason="disconnected")
-            if partner_id:
-                await manager.send_to_user(partner_id, {
-                    "type": "partner_left",
-                    "mode": "stranger",
-                    "session_id": session.session_id,
-                })
-
-        # Mark offline
-        user = await User.get(user_oid)
-        if user:
-            user.is_online = False
-            user.last_seen = datetime.now(timezone.utc)
-            await user.save()
-
-            friend_ids = await get_friend_ids(user_oid)
-            await manager.broadcast_to_users(friend_ids, {
-                "type": "presence",
-                "mode": "friends",
-                "user_id": user_id,
-                "is_online": False,
-            })
+        removed = manager.unregister(uid, ws)
+        if removed or not manager.is_connected(uid):
+            await stranger.disconnect(uid)
+            fresh = await User.get(user.id)
+            if fresh:
+                await _set_presence(fresh, False)

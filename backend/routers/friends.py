@@ -1,148 +1,130 @@
-from fastapi import APIRouter, Depends, HTTPException
-from typing import List
-from beanie.operators import Or
 from beanie import PydanticObjectId
+from beanie.operators import Or
+from fastapi import APIRouter, Depends, HTTPException
 
-from models import User, Friendship, FriendshipStatus
-from schemas import FriendshipOut, FriendOut
 from auth import get_current_user
+from models import Block, Conversation, Friendship, FriendshipStatus, User, as_utc
+from ratelimit import limiter
+from schemas import public_user
 from websocket.manager import manager
 
 router = APIRouter(prefix="/friends", tags=["friends"])
 
-async def populate_friendship(friendship: Friendship) -> dict:
-    requester = await User.get(friendship.requester_id)
-    receiver = await User.get(friendship.receiver_id)
+
+def _oid(value: str) -> PydanticObjectId:
+    try:
+        return PydanticObjectId(value)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid id")
+
+
+def _between(a: PydanticObjectId, b: PydanticObjectId):
+    return Or({"requester_id": a, "receiver_id": b}, {"requester_id": b, "receiver_id": a})
+
+
+async def is_blocked_either_way(a: PydanticObjectId, b: PydanticObjectId) -> bool:
+    return await Block.find(Or(
+        {"blocker_id": a, "blocked_id": b}, {"blocker_id": b, "blocked_id": a},
+    )).count() > 0
+
+
+async def are_friends(a: PydanticObjectId, b: PydanticObjectId) -> bool:
+    f = await Friendship.find_one(_between(a, b))
+    return bool(f and f.status == FriendshipStatus.accepted)
+
+
+async def _request_out(f: Friendship, me: User) -> dict:
+    other_id = f.receiver_id if f.requester_id == me.id else f.requester_id
+    other = await User.get(other_id)
     return {
-        **friendship.dict(),
-        "requester": requester,
-        "receiver": receiver,
-        "id": str(friendship.id),
-        "requester_id": str(friendship.requester_id),
-        "receiver_id": str(friendship.receiver_id)
+        "id": str(f.id),
+        "direction": "outgoing" if f.requester_id == me.id else "incoming",
+        "user": public_user(other) if other else None,
+        "created_at": as_utc(f.created_at),
     }
 
-@router.post("/request/{user_id}", response_model=FriendshipOut, status_code=201)
-async def send_request(
-    user_id: str,
-    current_user: User = Depends(get_current_user),
-):
-    try:
-        target_oid = PydanticObjectId(user_id)
-    except:
-        raise HTTPException(status_code=400, detail="Invalid user ID")
 
-    if target_oid == current_user.id:
-        raise HTTPException(status_code=400, detail="Cannot friend yourself")
+@router.get("")
+async def list_friends(user: User = Depends(get_current_user)):
+    friendships = await Friendship.find(
+        Friendship.status == FriendshipStatus.accepted,
+        Or(Friendship.requester_id == user.id, Friendship.receiver_id == user.id),
+    ).to_list()
+    out = []
+    for f in friendships:
+        other = await User.get(f.receiver_id if f.requester_id == user.id else f.requester_id)
+        if other and not other.is_suspended:
+            out.append({**public_user(other), "friendship_id": str(f.id)})
+    return sorted(out, key=lambda x: (not x["is_online"], x["username"].lower()))
 
-    target = await User.get(target_oid)
-    if not target:
+
+@router.get("/requests")
+async def list_requests(user: User = Depends(get_current_user)):
+    pending = await Friendship.find(
+        Friendship.status == FriendshipStatus.pending,
+        Or(Friendship.requester_id == user.id, Friendship.receiver_id == user.id),
+    ).sort("-created_at").to_list()
+    return [r for r in [await _request_out(f, user) for f in pending] if r["user"]]
+
+
+@router.post("/request/{user_id}", status_code=201)
+async def send_request(user_id: str, user: User = Depends(get_current_user)):
+    target_id = _oid(user_id)
+    if target_id == user.id:
+        raise HTTPException(status_code=400, detail="You can't add yourself")
+    limiter.enforce(f"friendreq:{user.id}", 20, 3600, "You've sent a lot of requests. Try again later.")
+
+    target = await User.get(target_id)
+    if target is None or target.is_suspended or target.is_bot or await is_blocked_either_way(user.id, target_id):
         raise HTTPException(status_code=404, detail="User not found")
 
-    existing = await Friendship.find_one(
-        Or(
-            {"requester_id": current_user.id, "receiver_id": target_oid},
-            {"requester_id": target_oid, "receiver_id": current_user.id}
-        )
-    )
+    existing = await Friendship.find_one(_between(user.id, target_id))
     if existing:
-        raise HTTPException(status_code=400, detail="Friendship already exists")
+        if existing.status == FriendshipStatus.accepted:
+            raise HTTPException(status_code=409, detail="Already friends")
+        if existing.status == FriendshipStatus.pending:
+            if existing.receiver_id == user.id:
+                # They already asked you — treat this as accepting.
+                return await accept_request(str(existing.id), user)
+            raise HTTPException(status_code=409, detail="Request already sent")
+        await existing.delete()  # an old rejection; allow asking again
 
-    friendship = Friendship(requester_id=current_user.id, receiver_id=target_oid)
-    await friendship.insert()
-
-    # Notify target via WS
-    await manager.send_to_user(str(target_oid), {
-        "type": "friend_request",
-        "from_user_id": str(current_user.id),
-        "friendship_id": str(friendship.id),
-    })
-
-    return await populate_friendship(friendship)
-
-
-@router.post("/accept/{friendship_id}", response_model=FriendshipOut)
-async def accept_request(
-    friendship_id: str,
-    current_user: User = Depends(get_current_user),
-):
-    try:
-        fid = PydanticObjectId(friendship_id)
-    except:
-        raise HTTPException(status_code=400, detail="Invalid ID")
-
-    friendship = await Friendship.get(fid)
-    if not friendship:
-        raise HTTPException(status_code=404, detail="Friendship not found")
-    if friendship.receiver_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not your request to accept")
-    if friendship.status != FriendshipStatus.pending:
-        raise HTTPException(status_code=400, detail="Request already handled")
-
-    friendship.status = FriendshipStatus.accepted
-    await friendship.save()
-    return await populate_friendship(friendship)
+    f = Friendship(requester_id=user.id, receiver_id=target_id)
+    await f.insert()
+    await manager.send(str(target_id), {"type": "friend.request", "request_id": str(f.id),
+                                        "from": public_user(user)})
+    return await _request_out(f, user)
 
 
-@router.post("/reject/{friendship_id}", response_model=FriendshipOut)
-async def reject_request(
-    friendship_id: str,
-    current_user: User = Depends(get_current_user),
-):
-    try:
-        fid = PydanticObjectId(friendship_id)
-    except:
-        raise HTTPException(status_code=400, detail="Invalid ID")
-
-    friendship = await Friendship.get(fid)
-    if not friendship:
-        raise HTTPException(status_code=404, detail="Friendship not found")
-    if friendship.receiver_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not your request to reject")
-    if friendship.status != FriendshipStatus.pending:
-        raise HTTPException(status_code=400, detail="Request already handled")
-
-    friendship.status = FriendshipStatus.rejected
-    await friendship.save()
-    return await populate_friendship(friendship)
+@router.post("/accept/{request_id}")
+async def accept_request(request_id: str, user: User = Depends(get_current_user)):
+    f = await Friendship.get(_oid(request_id))
+    if f is None or f.receiver_id != user.id or f.status != FriendshipStatus.pending:
+        raise HTTPException(status_code=404, detail="Request not found")
+    f.status = FriendshipStatus.accepted
+    await f.save()
+    await manager.send(str(f.requester_id), {"type": "friend.accepted", "user": public_user(user)})
+    return await _request_out(f, user)
 
 
-@router.get("", response_model=List[FriendOut])
-async def list_friends(
-    current_user: User = Depends(get_current_user),
-):
-    friendships = await Friendship.find(
-        {"status": FriendshipStatus.accepted},
-        Or(
-            {"requester_id": current_user.id},
-            {"receiver_id": current_user.id}
-        )
-    ).to_list()
-
-    friends = []
-    for f in friendships:
-        other_id = f.receiver_id if f.requester_id == current_user.id else f.requester_id
-        other = await User.get(other_id)
-        if other:
-            friends.append(
-                FriendOut(
-                    id=str(other.id),
-                    username=other.username,
-                    avatar_url=other.avatar_url,
-                    is_online=other.is_online,
-                    last_seen=other.last_seen,
-                    friendship_id=str(f.id),
-                )
-            )
-    return friends
+@router.post("/decline/{request_id}", status_code=204)
+async def decline_request(request_id: str, user: User = Depends(get_current_user)):
+    """Decline an incoming request or cancel an outgoing one."""
+    f = await Friendship.get(_oid(request_id))
+    if f is None or f.status != FriendshipStatus.pending or user.id not in (f.requester_id, f.receiver_id):
+        raise HTTPException(status_code=404, detail="Request not found")
+    if f.receiver_id == user.id:
+        f.status = FriendshipStatus.rejected
+        await f.save()
+    else:
+        await f.delete()
 
 
-@router.get("/pending", response_model=List[FriendshipOut])
-async def pending_requests(
-    current_user: User = Depends(get_current_user),
-):
-    friendships = await Friendship.find(
-        {"status": FriendshipStatus.pending, "receiver_id": current_user.id}
-    ).to_list()
-    
-    return [await populate_friendship(f) for f in friendships]
+@router.delete("/{user_id}", status_code=204)
+async def unfriend(user_id: str, user: User = Depends(get_current_user)):
+    other = _oid(user_id)
+    await Friendship.find(_between(user.id, other)).delete()
+    # The conversation stays, but nobody can post in it until they're friends again.
+    conv = await Conversation.find_one({"member_ids": {"$all": [user.id, other]}})
+    if conv:
+        await manager.send(user_id, {"type": "friend.removed", "user_id": str(user.id)})

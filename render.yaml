@@ -1,0 +1,30 @@
+# Render blueprint for the API (free plan). Deploy the frontend on Vercel — see docs/DEPLOY-FREE.md.
+services:
+  - type: web
+    name: pingpong-api
+    runtime: docker
+    rootDir: backend
+    plan: free
+    numInstances: 1          # in-process matchmaking: keep a single instance
+    healthCheckPath: /ready
+    envVars:
+      - key: ENV
+        value: production
+      - key: SECRET_KEY
+        generateValue: true
+      - key: MONGODB_URL
+        sync: false          # e.g. a MongoDB Atlas connection string
+      - key: DB_NAME
+        value: pingpong
+      - key: ALLOWED_ORIGINS
+        sync: false          # https://your-frontend.vercel.app
+      - key: TRUST_PROXY
+        value: "true"
+      - key: FORWARDED_ALLOW_IPS
+        value: "*"
+      - key: ADMIN_EMAILS
+        sync: false
+      - key: BOTS_ENABLED
+        value: "true"
+      - key: ANTHROPIC_API_KEY   # optional; leave empty to keep everything free
+        sync: false

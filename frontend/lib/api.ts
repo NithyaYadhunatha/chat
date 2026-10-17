@@ -1,69 +1,100 @@
-import axios, { AxiosInstance, InternalAxiosRequestConfig } from 'axios';
+/**
+ * Small fetch wrapper for the backend (proxied at /api).
+ *
+ * The access token lives only in memory. When a request gets a 401 we try one
+ * silent refresh (the refresh token is an httpOnly cookie the JS can't read)
+ * and replay the request. Concurrent 401s share the same refresh.
+ */
 
-const api: AxiosInstance = axios.create({
-  baseURL: process.env.NEXT_PUBLIC_API_URL,
-  withCredentials: false, // no cookies needed anymore
-  headers: {
-    'ngrok-skip-browser-warning': 'true',
-  },
-});
-
-// Attach access token from memory on every request
-api.interceptors.request.use((config: InternalAxiosRequestConfig) => {
-  if (typeof window !== 'undefined') {
-    const token = (window as any).__access_token as string | undefined;
-    if (token) {
-      config.headers.Authorization = `Bearer ${token}`;
-    }
+export class ApiError extends Error {
+  constructor(public status: number, message: string) {
+    super(message);
   }
-  return config;
-});
+}
 
-// Auto-refresh on 401
-let refreshing = false;
-let refreshQueue: Array<(token: string) => void> = [];
+let accessToken: string | null = null;
+let refreshing: Promise<string | null> | null = null;
+const listeners = new Set<(token: string | null) => void>();
 
-api.interceptors.response.use(
-  (res) => res,
-  async (error) => {
-    const original = error.config;
-    if (error.response?.status === 401 && !original._retry) {
-      original._retry = true;
-      if (refreshing) {
-        return new Promise((resolve) => {
-          refreshQueue.push((token) => {
-            original.headers.Authorization = `Bearer ${token}`;
-            resolve(api(original));
-          });
-        });
-      }
-      refreshing = true;
-      try {
-        const storedRefresh = localStorage.getItem('refresh_token');
-        if (!storedRefresh) throw new Error('No refresh token');
-        
-        const { data } = await axios.post(
-          `${process.env.NEXT_PUBLIC_API_URL}/auth/refresh`,
-          { refresh_token: storedRefresh }, // send in body
-          { headers: { 'ngrok-skip-browser-warning': 'true' } }
-        );
-        const newToken: string = data.access_token;
-        if (data.refresh_token) localStorage.setItem('refresh_token', data.refresh_token);
-        (window as any).__access_token = newToken;
-        refreshQueue.forEach((cb) => cb(newToken));
-        refreshQueue = [];
-        original.headers.Authorization = `Bearer ${newToken}`;
-        return api(original);
-      } catch {
-        localStorage.removeItem('refresh_token');
-        (window as any).__access_token = undefined;
-        window.location.href = '/login';
-      } finally {
-        refreshing = false;
-      }
-    }
-    return Promise.reject(error);
+export function getAccessToken() {
+  return accessToken;
+}
+
+export function setAccessToken(token: string | null) {
+  accessToken = token;
+  listeners.forEach((l) => l(token));
+}
+
+export function onTokenChange(listener: (token: string | null) => void) {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+function detailOf(body: unknown, fallback: string): string {
+  if (body && typeof body === 'object' && 'detail' in body) {
+    const d = (body as { detail: unknown }).detail;
+    if (typeof d === 'string') return d;
+    // FastAPI validation errors: [{ msg: "..." }]
+    if (Array.isArray(d) && d[0]?.msg) return String(d[0].msg).replace(/^Value error, /, '');
   }
-);
+  return fallback;
+}
 
-export default api;
+/** Exchange the refresh cookie for a new access token. Returns null if signed out. */
+export function refreshSession(): Promise<string | null> {
+  if (!refreshing) {
+    refreshing = fetch('/api/auth/refresh', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'X-Requested-With': 'fetch' },
+    })
+      .then(async (res) => {
+        if (!res.ok) {
+          setAccessToken(null);
+          return null;
+        }
+        const data = await res.json();
+        setAccessToken(data.access_token);
+        return data.access_token as string;
+      })
+      .catch(() => null)
+      .finally(() => {
+        refreshing = null;
+      });
+  }
+  return refreshing;
+}
+
+type Options = Omit<RequestInit, 'body'> & { body?: unknown; retry?: boolean };
+
+export async function api<T = unknown>(path: string, { body, retry = true, headers, ...init }: Options = {}): Promise<T> {
+  const res = await fetch(`/api${path}`, {
+    ...init,
+    credentials: 'same-origin',
+    headers: {
+      'X-Requested-With': 'fetch',
+      ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+      ...headers,
+    },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+
+  if (res.status === 401 && retry && !path.startsWith('/auth/')) {
+    const token = await refreshSession();
+    if (token) return api<T>(path, { body, retry: false, headers, ...init });
+  }
+
+  if (res.status === 204) return undefined as T;
+  const data = await res.json().catch(() => null);
+  if (!res.ok) {
+    const fallback = res.status >= 500 ? 'Something went wrong on our side. Try again.' : 'Request failed';
+    throw new ApiError(res.status, detailOf(data, fallback));
+  }
+  return data as T;
+}
+
+export function errorMessage(err: unknown): string {
+  if (err instanceof ApiError) return err.message;
+  return 'Network error. Check your connection.';
+}

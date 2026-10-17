@@ -1,177 +1,111 @@
 'use client';
 
-import { useState, FormEvent } from 'react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
-import { useStore } from '@/lib/store';
-import api from '@/lib/api';
-import { useGoogleLogin } from '@react-oauth/google';
+import { useSearchParams } from 'next/navigation';
+import { Suspense, useState } from 'react';
+import { GoogleButton, useAfterAuth, useRedirectIfSignedIn } from '@/components/auth';
+import { BirthDateInput, ageFrom } from '@/components/birthdate';
+import { Alert, Button, Checkbox, Field } from '@/components/ui';
+import { api, errorMessage } from '@/lib/api';
+import { useSession } from '@/lib/session';
 
+const USERNAME = /^[A-Za-z0-9_]{3,20}$/;
 
+function RegisterForm() {
+  useRedirectIfSignedIn();
+  const signIn = useSession((s) => s.signIn);
+  const after = useAfterAuth();
+  const params = useSearchParams();
 
-export default function RegisterPage() {
-  const router = useRouter();
-  const { setAccessToken, setCurrentUser } = useStore();
   const [username, setUsername] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [error, setError] = useState('');
-  const [loading, setLoading] = useState(false);
+  const [birth, setBirth] = useState('');
+  const [agree, setAgree] = useState(false);
+  const [touched, setTouched] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
-  async function handleSubmit(e: FormEvent) {
+  const age = birth ? ageFrom(birth) : null;
+  const problems = {
+    username: username && !USERNAME.test(username) ? '3–20 characters: letters, numbers, underscores.' : null,
+    password: password && password.length < 8 ? 'At least 8 characters.' : null,
+    birth: age !== null && age < 18 ? 'You need to be 18 or older to use this service.' : null,
+  };
+  const ready = USERNAME.test(username) && email.includes('@') && password.length >= 8 && age !== null && age >= 18 && agree;
+
+  const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setError('');
-    setLoading(true);
+    setTouched(true);
+    if (!ready) return;
+    setBusy(true);
+    setError(null);
     try {
-      const { data } = await api.post('/auth/register', { username, email, password });
-      setAccessToken(data.access_token);
-      if (data.refresh_token) {
-        localStorage.setItem('refresh_token', data.refresh_token);
-      }
-      const { data: me } = await api.get('/users/me');
-      setCurrentUser(me);
-      router.push('/conversations');
-    } catch (err: any) {
-      setError(err?.response?.data?.detail ?? 'Registration failed. Please try again.');
-    } finally {
-      setLoading(false);
+      const { access_token } = await api<{ access_token: string }>('/auth/register', {
+        method: 'POST',
+        body: { username, email: email.trim(), password, birth_date: birth, accept_rules: agree },
+      });
+      after(await signIn(access_token));
+    } catch (err) {
+      setError(errorMessage(err));
+      setBusy(false);
     }
-  }
-
-  const loginWithGoogle = useGoogleLogin({
-    flow: 'auth-code',
-    onSuccess: async (codeResponse) => {
-      setError('');
-      setLoading(true);
-      try {
-        const { data } = await api.post('/auth/google', { code: codeResponse.code });
-        setAccessToken(data.access_token);
-        if (data.refresh_token) {
-          localStorage.setItem('refresh_token', data.refresh_token);
-        }
-        const { data: me } = await api.get('/users/me');
-        setCurrentUser(me);
-        router.push('/conversations');
-      } catch (err: any) {
-        setError(err?.response?.data?.detail ?? 'Google authentication failed.');
-      } finally {
-        setLoading(false);
-      }
-    },
-    onError: () => setError('Google Login Failed'),
-  });
+  };
 
   return (
-    <main className="min-h-screen flex items-center justify-center bg-gray-950 px-4">
-      <div className="w-full max-w-md">
-        {/* Logo */}
-        <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-indigo-600 mb-4 shadow-lg shadow-indigo-500/30">
-            <svg viewBox="0 0 24 24" fill="none" className="w-7 h-7 text-white" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 3v-3z" />
-            </svg>
-          </div>
-          <h1 className="text-3xl font-bold text-white tracking-tight">Create your account</h1>
-          <p className="mt-2 text-gray-400 text-sm">Join ChatApp and start chatting</p>
-        </div>
-
-        {/* Card */}
-        <div className="bg-gray-900 border border-gray-800 rounded-2xl p-8 shadow-2xl">
-          <form onSubmit={handleSubmit} className="space-y-5">
-            {error && (
-              <div className="bg-red-500/10 border border-red-500/30 rounded-lg px-4 py-3 text-sm text-red-400 animate-fade-in">
-                {error}
-              </div>
-            )}
-
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium text-gray-300" htmlFor="username">Username</label>
-              <input
-                id="username"
-                type="text"
-                autoComplete="username"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                required
-                minLength={3}
-                placeholder="cooluser123"
-                className="w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all duration-150"
-              />
-            </div>
-
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium text-gray-300" htmlFor="email">Email</label>
-              <input
-                id="email"
-                type="email"
-                autoComplete="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                required
-                placeholder="you@example.com"
-                className="w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all duration-150"
-              />
-            </div>
-
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium text-gray-300" htmlFor="password">Password</label>
-              <input
-                id="password"
-                type="password"
-                autoComplete="new-password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-                minLength={6}
-                placeholder="Min. 6 characters"
-                className="w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all duration-150"
-              />
-            </div>
-
-            <button
-              id="register-submit"
-              type="submit"
-              disabled={loading}
-              className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-60 disabled:cursor-not-allowed text-white font-semibold py-2.5 rounded-xl transition-all duration-150 shadow-lg shadow-indigo-500/20 hover:shadow-indigo-500/30 active:scale-[0.98]"
-            >
-              {loading ? 'Creating account…' : 'Create account'}
-            </button>
-            
-            <div className="relative my-6">
-              <div className="absolute inset-0 flex items-center">
-                <div className="w-full border-t border-gray-800"></div>
-              </div>
-              <div className="relative flex justify-center text-sm">
-                <span className="px-2 bg-gray-900 text-gray-500">Or continue with</span>
-              </div>
-            </div>
-            
-            <div className="flex justify-center">
-              <button
-                type="button"
-                onClick={() => loginWithGoogle()}
-                disabled={loading}
-                className="w-full flex items-center justify-center gap-3 bg-white hover:bg-gray-50 text-gray-900 font-semibold py-2.5 rounded-xl transition-all duration-150 shadow-sm border border-gray-200 disabled:opacity-60 disabled:cursor-not-allowed"
-              >
-                <svg className="w-5 h-5" viewBox="0 0 24 24">
-                  <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4" />
-                  <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853" />
-                  <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05" />
-                  <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335" />
-                </svg>
-                Continue with Google
-              </button>
-            </div>
-          </form>
-        </div>
-
-        <p className="text-center mt-5 text-sm text-gray-500">
-          Already have an account?{' '}
-          <Link href="/login" className="text-indigo-400 hover:text-indigo-300 font-medium transition-colors">
-            Sign in
-          </Link>
-        </p>
+    <div className="space-y-8">
+      <div className="space-y-2">
+        <h1 className="text-2xl font-medium tracking-tight">Create an account</h1>
+        <p className="text-sm text-muted">Strangers never see any of this. It keeps the place adults-only and lets bans stick.</p>
       </div>
-    </main>
+
+      <form onSubmit={submit} className="space-y-4" noValidate>
+        <Field label="Username" htmlFor="username" error={problems.username} hint="Only shown to people you add as friends.">
+          <input id="username" autoComplete="username" value={username} maxLength={20}
+            onChange={(e) => setUsername(e.target.value)} className="field font-mono" />
+        </Field>
+        <Field label="Email" htmlFor="email">
+          <input id="email" type="email" autoComplete="email" value={email}
+            onChange={(e) => setEmail(e.target.value)} className="field" />
+        </Field>
+        <Field label="Password" htmlFor="password" error={problems.password} hint="8+ characters. Mix letters with numbers or symbols.">
+          <input id="password" type="password" autoComplete="new-password" value={password}
+            onChange={(e) => setPassword(e.target.value)} className="field" />
+        </Field>
+        <Field label="Date of birth" htmlFor="dob-day" error={problems.birth}
+          hint={touched && !birth ? <span className="text-danger">Enter your date of birth.</span> : 'You can’t change this later.'}>
+          <BirthDateInput onChange={setBirth} />
+        </Field>
+        <div className="pt-1">
+          <Checkbox id="agree" checked={agree} onChange={setAgree}>
+            I’m 18 or older and I agree to the{' '}
+            <Link href="/rules" target="_blank" className="text-fg underline decoration-line-strong underline-offset-4">rules</Link>
+            : no sexual content, no harassment, no sharing contact details with strangers.
+          </Checkbox>
+        </div>
+        {error ? <Alert tone="danger">{error}</Alert> : null}
+        <Button type="submit" variant="primary" className="w-full" loading={busy} disabled={touched && !ready}>
+          Create account
+        </Button>
+      </form>
+
+      <GoogleButton />
+
+      <p className="text-sm text-muted">
+        Already have an account?{' '}
+        <Link href={`/login${params.get('next') ? `?next=${encodeURIComponent(params.get('next')!)}` : ''}`}
+          className="text-fg underline decoration-line-strong underline-offset-4 hover:decoration-fg">
+          Log in
+        </Link>
+      </p>
+    </div>
+  );
+}
+
+export default function RegisterPage() {
+  return (
+    <Suspense>
+      <RegisterForm />
+    </Suspense>
   );
 }

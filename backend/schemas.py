@@ -1,80 +1,54 @@
-from datetime import datetime
-from typing import Optional, List, Any
+import re
+from datetime import date, datetime
+from typing import List, Optional
 
-from pydantic import BaseModel, EmailStr, field_validator, model_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
+from models import ReportReason, User, as_utc
 
-def _str_id(v: Any) -> str:
-    """Convert ObjectId / PydanticObjectId to str."""
-    if v is None:
-        return v
-    return str(v)
+USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{3,20}$")
 
 
-# ── User ────────────────────────────────────────────────────────────────────
-
-class UserBase(BaseModel):
-    username: str
-    email: EmailStr
-
-
-class UserCreate(UserBase):
-    password: str
+def validate_username(v: str) -> str:
+    v = v.strip()
+    if not USERNAME_RE.match(v):
+        raise ValueError("Username must be 3–20 characters: letters, numbers and underscores")
+    return v
 
 
-class UserUpdate(BaseModel):
-    username: Optional[str] = None
-    avatar_url: Optional[str] = None
-
-
-class UserOut(BaseModel):
-    id: str
-    username: str
-    email: str
-    avatar_url: Optional[str] = None
-    is_online: bool
-    last_seen: datetime
-    created_at: datetime
-
-    model_config = {"from_attributes": True}
-
-    @field_validator("id", mode="before")
-    @classmethod
-    def coerce_id(cls, v: Any) -> str:
-        return str(v)
-
-
-class UserPublic(BaseModel):
-    """Minimal user info exposed to other users."""
-    id: str
-    username: str
-    avatar_url: Optional[str] = None
-    is_online: bool
-    last_seen: datetime
-
-    model_config = {"from_attributes": True}
-
-    @field_validator("id", mode="before")
-    @classmethod
-    def coerce_id(cls, v: Any) -> str:
-        return str(v)
+def validate_password(v: str) -> str:
+    if len(v) < 8:
+        raise ValueError("Password must be at least 8 characters")
+    if len(v.encode()) > 72:
+        raise ValueError("Password is too long")
+    if v.isdigit() or v.isalpha() and v.lower() == v:
+        raise ValueError("Use a mix of letters and numbers or symbols")
+    return v
 
 
 # ── Auth ────────────────────────────────────────────────────────────────────
 
-class LoginRequest(BaseModel):
+class RegisterRequest(BaseModel):
+    username: str
     email: EmailStr
     password: str
+    birth_date: date
+    accept_rules: bool
+
+    @field_validator("username")
+    @classmethod
+    def _username(cls, v: str) -> str:
+        return validate_username(v)
+
+    @field_validator("password")
+    @classmethod
+    def _password(cls, v: str) -> str:
+        return validate_password(v)
 
 
-class TokenResponse(BaseModel):
-    access_token: str
-    refresh_token: Optional[str] = None  # returned in body so frontend can set cookie cross-origin
-    token_type: str = "bearer"
-
-
-class TokenRefreshRequest(BaseModel):
-    refresh_token: str
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(max_length=200)
 
 
 class GoogleAuthRequest(BaseModel):
@@ -82,89 +56,104 @@ class GoogleAuthRequest(BaseModel):
     code: Optional[str] = None
 
 
-# ── Friendship ───────────────────────────────────────────────────────────────
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int
 
-class FriendshipOut(BaseModel):
-    id: str
-    requester_id: str
-    receiver_id: str
-    status: str
-    created_at: datetime
-    requester: UserPublic
-    receiver: UserPublic
 
-    model_config = {"from_attributes": True}
+# ── Users ───────────────────────────────────────────────────────────────────
 
-    @field_validator("id", "requester_id", "receiver_id", mode="before")
+class OnboardingRequest(BaseModel):
+    birth_date: date
+    accept_rules: bool
+
+
+class UpdateMeRequest(BaseModel):
+    username: Optional[str] = None
+    interests: Optional[List[str]] = None
+
+    @field_validator("username")
     @classmethod
-    def coerce_ids(cls, v: Any) -> str:
-        return str(v)
+    def _username(cls, v):
+        return validate_username(v) if v is not None else v
 
 
-class FriendOut(BaseModel):
+class ChangePasswordRequest(BaseModel):
+    current_password: Optional[str] = None
+    new_password: str
+
+    @field_validator("new_password")
+    @classmethod
+    def _password(cls, v: str) -> str:
+        return validate_password(v)
+
+
+class DeleteAccountRequest(BaseModel):
+    password: Optional[str] = None
+    confirm: str  # must equal the username
+
+
+class UserPublic(BaseModel):
     id: str
     username: str
     avatar_url: Optional[str] = None
     is_online: bool
     last_seen: datetime
-    friendship_id: str
-
-    model_config = {"from_attributes": True}
-
-    @field_validator("id", "friendship_id", mode="before")
-    @classmethod
-    def coerce_ids(cls, v: Any) -> str:
-        return str(v)
 
 
-# ── Message ──────────────────────────────────────────────────────────────────
+def public_user(u: User) -> dict:
+    return {"id": str(u.id), "username": u.username, "avatar_url": u.avatar_url,
+            "is_online": u.is_online, "last_seen": as_utc(u.last_seen)}
+
+
+# ── Messages ────────────────────────────────────────────────────────────────
 
 class MessageCreate(BaseModel):
-    content: str
-    message_type: str = "text"
+    content: str = Field(min_length=1, max_length=4000)
+    reply_to: Optional[str] = None
 
 
-class MessageOut(BaseModel):
-    id: str
-    conversation_id: str
-    sender_id: str
-    content: str
-    message_type: str
-    is_read: bool
-    created_at: datetime
-    sender: UserPublic
-
-    model_config = {"from_attributes": True}
-
-    @field_validator("id", "conversation_id", "sender_id", mode="before")
-    @classmethod
-    def coerce_ids(cls, v: Any) -> str:
-        return str(v)
+class MessageEdit(BaseModel):
+    content: str = Field(min_length=1, max_length=4000)
 
 
-# ── Conversation ─────────────────────────────────────────────────────────────
-
-class ConversationCreate(BaseModel):
-    user_id: str  # the other participant
+class ReactionSet(BaseModel):
+    emoji: Optional[str] = None  # None removes your reaction
 
 
-class ConversationOut(BaseModel):
-    id: str
-    created_at: datetime
-    other_user: UserPublic
-    last_message: Optional[MessageOut] = None
-    unread_count: int
-
-    model_config = {"from_attributes": True}
-
-    @field_validator("id", mode="before")
-    @classmethod
-    def coerce_id(cls, v: Any) -> str:
-        return str(v)
+class StartConversationRequest(BaseModel):
+    user_id: str
 
 
-# ── Paginated messages ───────────────────────────────────────────────────────
+# ── Reports & blocks ────────────────────────────────────────────────────────
 
-class MessagePage(BaseModel):
-    messages: List[MessageOut]
-    next_cursor: Optional[str]  # id of the oldest message returned — pass as ?before=
+class StrangerReportRequest(BaseModel):
+    session_id: str
+    reason: ReportReason
+    details: Optional[str] = Field(default=None, max_length=1000)
+    block: bool = True
+
+
+class StrangerBlockRequest(BaseModel):
+    session_id: str
+
+
+class UserReportRequest(BaseModel):
+    user_id: str
+    reason: ReportReason
+    details: Optional[str] = Field(default=None, max_length=1000)
+    conversation_id: Optional[str] = None
+
+
+# ── Admin ───────────────────────────────────────────────────────────────────
+
+class ResolveReportRequest(BaseModel):
+    action: str  # "dismiss" | "warn" | "ban_24h" | "ban_7d" | "ban_permanent" | "suspend"
+    note: Optional[str] = Field(default=None, max_length=1000)
+
+
+class UserActionRequest(BaseModel):
+    action: str  # "lift" | "ban_24h" | "ban_7d" | "ban_permanent" | "suspend" | "clear_age_review" | "set_role"
+    note: Optional[str] = Field(default=None, max_length=1000)
+    role: Optional[str] = None
