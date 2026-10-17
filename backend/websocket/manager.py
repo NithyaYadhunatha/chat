@@ -1,34 +1,67 @@
 import asyncio
 import json
-from typing import Dict
+from dataclasses import dataclass, field
+from typing import Dict, Iterable, Optional
+
 from fastapi import WebSocket
 
 
+@dataclass
+class Connection:
+    ws: WebSocket
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
 class ConnectionManager:
-    def __init__(self):
-        self._connections: Dict[int, WebSocket] = {}
+    """One live socket per user. A new login on another tab replaces the old socket."""
 
-    async def connect(self, user_id: int, websocket: WebSocket):
-        await websocket.accept()
-        self._connections[user_id] = websocket
+    def __init__(self) -> None:
+        self._connections: Dict[str, Connection] = {}
 
-    def disconnect(self, user_id: int):
-        self._connections.pop(user_id, None)
+    async def register(self, user_id: str, ws: WebSocket) -> Optional[WebSocket]:
+        previous = self._connections.get(user_id)
+        self._connections[user_id] = Connection(ws)
+        return previous.ws if previous else None
 
-    def is_connected(self, user_id: int) -> bool:
+    def unregister(self, user_id: str, ws: WebSocket) -> bool:
+        """Remove the user's socket if it is still `ws`. Returns True if it was removed."""
+        current = self._connections.get(user_id)
+        if current and current.ws is ws:
+            del self._connections[user_id]
+            return True
+        return False
+
+    def is_connected(self, user_id: str) -> bool:
         return user_id in self._connections
 
-    async def send_to_user(self, user_id: int, data: dict):
-        ws = self._connections.get(user_id)
-        if ws:
-            try:
-                await ws.send_text(json.dumps(data))
-            except Exception:
-                self.disconnect(user_id)
+    def online_count(self) -> int:
+        return len(self._connections)
 
-    async def broadcast_to_users(self, user_ids: list[int], data: dict):
+    async def send(self, user_id: str, data: dict) -> None:
+        conn = self._connections.get(user_id)
+        if not conn:
+            return
+        try:
+            async with conn.lock:
+                await conn.ws.send_text(json.dumps(data, default=str))
+        except Exception:
+            self.unregister(user_id, conn.ws)
+
+    async def close(self, user_id: str, code: int = 4003) -> None:
+        conn = self._connections.pop(user_id, None)
+        if conn:
+            try:
+                await conn.ws.close(code=code)
+            except Exception:
+                pass
+
+    async def close_all(self, code: int = 1012) -> None:
+        for uid in list(self._connections):
+            await self.close(uid, code=code)
+
+    async def broadcast(self, user_ids: Iterable[str], data: dict) -> None:
         for uid in user_ids:
-            await self.send_to_user(uid, data)
+            await self.send(uid, data)
 
 
 manager = ConnectionManager()
