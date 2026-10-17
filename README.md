@@ -6,6 +6,8 @@
 - **Backend:** FastAPI, Beanie/Motor, MongoDB, native WebSockets
 - **Moderation:** context-aware pattern filter + optional Claude conversation monitor + human review queue
 
+**Live:** <https://chat-sage-ten.vercel.app> · API: <https://veil-ffjk.onrender.com> (`/health`, `/ready`)
+
 - **Deploy for free:** [`docs/DEPLOY-FREE.md`](docs/DEPLOY-FREE.md) (Vercel + Render + MongoDB Atlas)
 - **Competitor research:** [`docs/competitor-research.md`](docs/competitor-research.md)
 
@@ -20,7 +22,7 @@
 | Private ratings | "Good rally?" after a match. Never shown to anyone; players many strangers rate badly are matched mostly with each other (a low-trust pool) instead of being publicly shamed or banned |
 | CPU opponents | When it's quiet, a clearly-labelled AI practice bot ("the CPU") plays you after ~12 s, or right away via "Play the CPU". Five personas; free scripted brain, or Claude when `ANTHROPIC_API_KEY` is set. Always honest about being a bot, filtered like humans, never counted as "online", can't be befriended |
 | Bot defence | The same long message pasted into many chats is stopped, and struck at bot-level volume |
-| Friends & DMs | Friend list, requests, 1:1 messages with read receipts and presence. Only friends can message each other |
+| Chats (friends & DMs) | One **Chats** tab holds friend requests, add-by-username, conversations and friends you haven't messaged yet. 1:1 messages with read receipts and presence. Only friends can message each other. Settings open from your username |
 | Age gate | Date of birth at sign-up (18+), onboarding for Google accounts; anyone who says they're under 18 is pulled out of stranger chat until a moderator checks |
 | Content filter | Normalises evasions (l33t, Cyrillic look-alikes, zero-width chars, `s e x`, `seeexxx`) then scores sexual content, grooming, minors, hate, harassment, threats, self-harm, contact/PII/links, scams |
 | Context rules | Sexual remarks escalate (warn → block → end chat). Anything sexual towards someone who said they're a minor, or CSAM terms, suspends the account. Asking for a Snapchat after sexual talk ends the chat |
@@ -38,6 +40,31 @@
 - PyJWT (replacing python-jose), bcrypt, constant-time login, per-email lockout, rate limits on login/sign-up/messages/reports/friend requests/skips
 - CSRF header on cookie endpoints, regex-safe user search, strict CSP and security headers on both apps, `/docs` hidden in production
 - Partner user IDs never cross the wire in stranger chat
+
+---
+
+## Project layout
+
+```
+backend/            FastAPI app
+  main.py           app, CORS, /health, /ready, /ws, background matcher
+  config.py         all settings (env vars) + production guardrails
+  database.py       MongoDB (Motor/Beanie) or in-memory for demos
+  auth.py           JWT access tokens, refresh rotation, replay detection
+  moderation/       normalise -> rules -> engine -> enforcement, AI monitor, trust
+  matching/         matchmaker, live sessions, conversation starters
+  bots/             CPU personas and brain
+  websocket/        socket handler, connection manager, stranger chat
+  routers/          auth, users, friends, conversations, reports, stranger, admin
+  tests/            pytest suite (in-memory Mongo)
+frontend/           Next.js 14 app
+  app/              landing, rules, login/register, chat, messages, settings, admin
+  components/       app shell, chat message + composer, report dialog, UI kit
+  lib/              API client (silent refresh), session, socket, stores
+docs/               free deploy guide, competitor research
+render.yaml         Render blueprint for the API
+docker-compose.yml  MongoDB + API + web on one box
+```
 
 ---
 
@@ -77,20 +104,42 @@ Covers the filter (evasions + false positives), escalation/grooming logic, match
 
 ## Configuration
 
-`backend/.env` — see `backend/.env.example`:
+### Backend (`backend/.env`, or the Render dashboard)
 
-| Variable | Purpose |
-|---|---|
-| `ENV` | `production` turns on secure cookies, HSTS, hides `/docs` |
-| `SECRET_KEY` | 32+ chars, required |
-| `ALLOWED_ORIGINS` | Comma-separated frontend origins (CORS + WebSocket Origin check) |
-| `TRUST_PROXY` | Honour `X-Forwarded-For` for rate limits — only behind your own proxy |
-| `ADMIN_EMAILS` | Accounts that become admins on sign-in |
-| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Optional Google sign-in |
-| `ANTHROPIC_API_KEY` | Optional AI conversation monitor |
-| `MODERATION_MODEL` | Defaults to `claude-opus-5-5`; a cheaper model (e.g. `claude-haiku-5-5`) works if cost matters |
+| Variable | Default | Purpose |
+|---|---|---|
+| `ENV` | `development` | `production` turns on secure cookies, HSTS, hides `/docs`, and enforces the guardrails below |
+| `MONGODB_URL` | `mongodb://localhost:27017` | Atlas: the exact `mongodb+srv://…` string from **Connect → Drivers** |
+| `DB_NAME` | `chatapp` | Database name (`pingpong` in production) |
+| `USE_INMEMORY_DB` | `false` | `true` = throwaway in-memory DB for demos. Not allowed in production |
+| `SECRET_KEY` | — | **Required**, 32+ random chars: `python -c "import secrets; print(secrets.token_hex(32))"` |
+| `ACCESS_TOKEN_EXPIRE_MINUTES` | `15` | Access token lifetime |
+| `REFRESH_TOKEN_EXPIRE_DAYS` | `14` | Refresh cookie lifetime |
+| `ALLOWED_ORIGINS` | `http://localhost:3000` | Comma-separated frontend origins, no trailing slash. Used for CORS **and** the WebSocket Origin check |
+| `TRUST_PROXY` | `false` | Honour `X-Forwarded-For` for rate limits. `true` on Render |
+| `ADMIN_EMAILS` | — | Comma-separated emails that get the moderation dashboard on sign-in |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | — | Optional Google sign-in |
+| `ANTHROPIC_API_KEY` | — | Optional. Enables the AI conversation monitor and Claude-powered CPU bots |
+| `MODERATION_MODEL` | `claude-opus-5-5` | Model for the monitor; `claude-haiku-5-5` is cheaper |
+| `AI_MODERATION_INTERVAL_SECONDS` | `6` | Minimum gap between AI checks per chat |
+| `BOTS_ENABLED` | `true` | CPU opponents on/off |
+| `BOT_AFTER_SECONDS` | `12` | How long someone waits before the CPU is offered |
+| `BOT_MODEL` | `claude-opus-5-5` | Used only when `ANTHROPIC_API_KEY` is set |
+| `LOG_LEVEL` | `INFO` | Logging level |
+| `MAX_BODY_BYTES` | `65536` | Request body cap |
 
-`frontend/.env.local` — `BACKEND_URL` (server-side proxy target), `NEXT_PUBLIC_WS_URL` (`wss://…/ws` in production), optional `NEXT_PUBLIC_GOOGLE_CLIENT_ID`.
+With `ENV=production` the API **refuses to start** if `USE_INMEMORY_DB=true`, `SECRET_KEY` looks like a placeholder, or any `ALLOWED_ORIGINS` entry isn't `https://`. The log line says which one.
+
+### Frontend (`frontend/.env.local`, or Vercel → Settings → Environment Variables)
+
+| Variable | Example (production) | Purpose |
+|---|---|---|
+| `BACKEND_URL` | `https://veil-ffjk.onrender.com` | Where the `/api` proxy sends requests (server-side only) |
+| `NEXT_PUBLIC_WS_URL` | `wss://veil-ffjk.onrender.com/ws` | WebSocket the browser connects to. Must be `wss://` or the build fails |
+| `NEXT_PUBLIC_SITE_URL` | `https://chat-sage-ten.vercel.app` | Canonical URL for metadata, HSTS and CSP |
+| `NEXT_PUBLIC_GOOGLE_CLIENT_ID` | — | Optional; shows "Continue with Google" |
+
+These are read **at build time**, so redeploy on Vercel after changing any of them.
 
 ## Deploying
 
@@ -104,9 +153,37 @@ Runs MongoDB, the API and the web app (http://localhost:3000). For the public in
 
 ### Option B — managed services
 1. **Database:** a MongoDB Atlas cluster → copy the connection string.
-2. **API on Render:** "New → Blueprint" with this repo; `render.yaml` creates `PingPong-api` (Docker, health check on `/ready`, generated `SECRET_KEY`). Fill in `MONGODB_URL`, `ALLOWED_ORIGINS` (your Vercel URL), `ADMIN_EMAILS`, optionally `ANTHROPIC_API_KEY`.
+2. **API on Render:** "New → Blueprint" with this repo; `render.yaml` creates `pingpong-api` (Docker, health check on `/ready`, generated `SECRET_KEY`). Fill in `MONGODB_URL`, `ALLOWED_ORIGINS` (your Vercel URL), `ADMIN_EMAILS`, optionally `ANTHROPIC_API_KEY`.
 3. **Web on Vercel:** import the repo with root directory `frontend`, and set
-   `BACKEND_URL=https://PingPong-api.onrender.com`, `NEXT_PUBLIC_WS_URL=wss://PingPong-api.onrender.com/ws`, `NEXT_PUBLIC_SITE_URL=https://your-app.vercel.app`.
+   `BACKEND_URL=https://pingpong-api.onrender.com`, `NEXT_PUBLIC_WS_URL=wss://pingpong-api.onrender.com/ws`, `NEXT_PUBLIC_SITE_URL=https://your-app.vercel.app`.
+
+### Current production setup
+
+| Piece | Where | Notes |
+|---|---|---|
+| Web | Vercel → <https://chat-sage-ten.vercel.app> | Root directory `frontend`, deploys from `main` |
+| API | Render web service `veil` → <https://veil-ffjk.onrender.com> | Root directory `backend`, Python runtime, start command `uvicorn main:app --host 0.0.0.0 --port 10000`, free plan, one instance |
+| Database | MongoDB Atlas free cluster | Network Access allows `0.0.0.0/0` |
+| Google sign-in | Google Cloud OAuth client | Authorized JavaScript origin: `https://chat-sage-ten.vercel.app` |
+
+The three must agree: the Vercel URL goes in `NEXT_PUBLIC_SITE_URL`, in the API's `ALLOWED_ORIGINS`, and in Google's authorized origins.
+
+Use the **production** Vercel domain, not a branch preview URL (`chat-git-<branch>-….vercel.app`). Previews sit behind Vercel login, so nobody else can open them, and their address changes with the branch.
+
+### Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Render deploy fails with `ConfigurationError: The DNS query name does not exist: _mongodb._tcp.…` | `MONGODB_URL` points at a cluster host that doesn't exist (typo, partial paste, deleted cluster) | Re-copy the string from Atlas → Connect → Drivers, paste without quotes or spaces, URL-encode special characters in the password. Check with `nslookup -type=SRV _mongodb._tcp.<cluster-host>` |
+| Render deploy fails with `ServerSelectionTimeoutError` | Atlas is blocking Render's IP, or the DB user/password is wrong | Atlas → Network Access → add `0.0.0.0/0`; check the database user |
+| Render deploy fails with `Unsafe production config: …` | A production guardrail tripped | Fix the setting named in the message (secret, https origins, in-memory DB) |
+| Sign-up shows **"Request failed"** | Vercel's `/api` proxy can't reach the API — usually `BACKEND_URL` missing, or set after the last build | Set `BACKEND_URL` on Vercel and **redeploy** |
+| Signed in, but chat never connects | API's `ALLOWED_ORIGINS` doesn't contain the exact site origin, or `NEXT_PUBLIC_WS_URL` is wrong | `ALLOWED_ORIGINS=https://chat-sage-ten.vercel.app` (no trailing slash), `NEXT_PUBLIC_WS_URL=wss://veil-ffjk.onrender.com/ws`, redeploy both |
+| Google: **Error 400: origin_mismatch** | The site's URL isn't an authorized JavaScript origin | Google Cloud Console → Credentials → OAuth client → add the Vercel URL. Takes a few minutes to apply |
+| First request takes ~1 minute | Render free instance was asleep | Normal on the free plan; a free uptime monitor hitting `/health` every 10 minutes keeps it awake |
+| Live chats end after a deploy | Matching and live sessions are in memory | Expected; accounts, friends and DMs are in MongoDB and survive |
+
+Quick checks: `https://veil-ffjk.onrender.com/ready` should return `{"status":"ready"}`, and `https://chat-sage-ten.vercel.app/api/ready` should return the same through the proxy.
 
 ### Notes
 - Matchmaking, live sessions and rate limits are in-process: run **exactly one** API instance (the blueprint pins `numInstances: 1`). Moving that state to Redis is the step before scaling out.
